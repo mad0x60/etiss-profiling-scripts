@@ -13,6 +13,9 @@ import plotly.express as px
 
 DIR = os.path.dirname(os.path.realpath(__file__))
 
+# TODO
+DIR = Path(DIR).parent
+
 ETISS_INSTALL_DIR = Path("/work/git/hm/etiss_48bit/48bit-riscv-flow/install/etiss/")
 ETISS_EXE = ETISS_INSTALL_DIR / "bin" / "bare_etiss_processor"
 ETISS_EXAMPLES_DIR = Path("/work/git/hm/etiss_48bit/48bit-riscv-flow/etiss_riscv_examples")

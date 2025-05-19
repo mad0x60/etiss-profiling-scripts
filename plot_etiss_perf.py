@@ -16,16 +16,21 @@ assert len(sys.argv) == 2
 csv_path = sys.argv[1]
 
 
-REL = True
-# REL = False
+# REL = True
+REL = False
 
+# ALT = False
+ALT = True
 
 def main():
     reports = []
     full_df = pd.read_csv(csv_path)
 
     if not REL:
-        full_df["overhead"] = full_df["overhead"] * (full_df["time"] / full_df["time"].min()) / full_df["n_iter"]
+        if ALT:
+            full_df["overhead"] = full_df["overhead"] * (full_df["time"] / full_df["time"].min())
+        else:
+            full_df["overhead"] = full_df["overhead"] * (full_df["time"] / full_df["time"].min()) / full_df["n_iter"]
 
     for group, group_df in full_df.groupby(["prog", "etiss_arch", "block_size", "jit"], dropna=False):
         group_df = group_df.groupby(["n_iter","dso_new"], as_index=False, dropna=False).agg({"overhead": np.sum, "mips": np.mean})
@@ -40,7 +45,7 @@ def main():
         # TODO: add mips on other axis?
         # fig = px.area(group_df, x="n_iter", y="overhead", color="dso_new", line_group="country")
         fig = px.area(group_df_, x="n_iter", y="overhead", color="dso_new", title=title)
-        fig.add_scatter(x=group_df["n_iter"], y=group_df["mips"]/100, mode="markers", name="MIPS/100", marker=dict(size=10, color="darkgray"))
+        fig.add_scatter(x=group_df["n_iter"], y=group_df["mips"]/100, mode="markers", name="MIPS/100", marker=dict(size=10, color="black"))
         fig.write_html("plot.html")
         input("CHECK HTML")
 
