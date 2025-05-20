@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 import os
 import re
+import argparse
 import tempfile
 import subprocess
 from typing import Optional
@@ -16,34 +17,9 @@ DIR = os.path.dirname(os.path.realpath(__file__))
 # TODO
 DIR = Path(DIR).parent
 
-ETISS_INSTALL_DIR = Path("/work/git/hm/etiss_48bit/48bit-riscv-flow/install/etiss/")
+ETISS_INSTALL_DIR = Path(os.getenv("ETISS_INSTALL_DIR", "/work/git/hm/etiss_48bit/48bit-riscv-flow/install/etiss/"))
 ETISS_EXE = ETISS_INSTALL_DIR / "bin" / "bare_etiss_processor"
-ETISS_EXAMPLES_DIR = Path("/work/git/hm/etiss_48bit/48bit-riscv-flow/etiss_riscv_examples")
-
-ETISS_ARCH = "RV32IMACFD"
-
-# JITS = ["TCC", "GCC", "LLVM"]
-JITS = ["TCC"]
-# BLOCK_SIZES = [100, 1000]
-BLOCK_SIZES = [100]
-
-# PROG = "hello_world"
-PROG = "dhry"
-
-# ITERS = [1, 2, 10]
-# ITERS = [1, 2, 5, 10]
-ITERS = [1, 2, 5, 10, 20, 40, 80]
-REPEAT = 2
-
-TOOLCHAIN = "llvm"
-
-ARCH = "rv32gc"
-ABI = "ilp32d"
-
-BUILD_TYPE = "Release"
-
-OUTFILE = "etiss_perf.csv"
-
+ETISS_EXAMPLES_DIR = Path(os.getenv("ETISS_EXAMPLES_DIR", "/work/git/hm/etiss_48bit/48bit-riscv-flow/etiss_riscv_examples"))
 
 def populate_extra_ini(ini_path: Path, jit: str, block_size: Optional[int]):
     content = f"""
@@ -56,13 +32,13 @@ etiss.max_block_size={block_size}
     with open(ini_path, "w") as f:
         f.write(content)
 
-def get_etiss_cmd(extra_ini):
-    etiss_cmd = f"{ETISS_EXE} -i{ETISS_EXAMPLES_DIR}/build/install/ini/{PROG}.ini -i{extra_ini} --arch.cpu={ETISS_ARCH}"
+def get_etiss_cmd(extra_ini: Path, prog: str, etiss_arch: str = "RV32IMACFD"):
+    etiss_cmd = f"{ETISS_EXE} -i{ETISS_EXAMPLES_DIR}/build/install/ini/{prog}.ini -i{extra_ini} --arch.cpu={etiss_arch}"
     return etiss_cmd
 
-def get_mips(workdir: Path, repeat: int = 1):
+def get_mips(workdir: Path, prog: str, etiss_arch: str = "RV32IMACFD", repeat: int = 1):
     extra_ini = workdir / "extra.ini"
-    etiss_cmd = get_etiss_cmd(extra_ini)
+    etiss_cmd = get_etiss_cmd(extra_ini, prog, etiss_arch=etiss_arch)
     # TODO: run multiple times for avg?
     all_mips = []
     all_times = []
@@ -87,14 +63,14 @@ def get_mips(workdir: Path, repeat: int = 1):
     avg_time = sum(all_times) / repeat
     return avg_mips, avg_time, sim_insns
 
-def compile_prog(workdir: Path, n_iter):
-    command = f"{DIR}/scripts/compile_example.sh {PROG} {TOOLCHAIN} {ARCH} {ABI} {BUILD_TYPE} {n_iter}"
+def compile_prog(workdir: Path, prog: str, toolchain: str = "gcc", arch: str = "rv32gc", abi: str = "ilp32d", build_type: str = "Release", n_iter: int = 1):
+    command = f"{DIR}/scripts/compile_example.sh {prog} {toolchain} {arch} {abi} {build_type} {n_iter}"
     # _ = subprocess.run(command, check=True, text=True, shell=True, cwd=workdir, capture_output=True)
     _ = subprocess.run(command, check=True, text=True, shell=True, capture_output=True)
 
-def run_perf_record(workdir: Path):
+def run_perf_record(workdir: Path, prog: str, etiss_arch: str = "RV32IMACFD"):
     extra_ini = workdir / "extra.ini"
-    etiss_cmd = get_etiss_cmd(extra_ini)
+    etiss_cmd = get_etiss_cmd(extra_ini, prog, etiss_arch=etiss_arch)
 
     command = f"perf record -o {workdir}/perf.data {etiss_cmd}"
     # print("command", command)
@@ -105,18 +81,8 @@ def run_perf_record(workdir: Path):
     # print("out", out)
     # input("???")
 
-def get_perf_report(workdir: Path):
-    run_perf_record(workdir)
-    command = "perf report -F dso,overhead --stdio | grep '%' | tr -s ' ' | sed -e \"s/tid\\s[0-9]*//g\" | awk '{print $1 \",\" $2/100}'"
-    # print("command", command)
 
-    outfile = workdir / "out.csv"
-    with open(outfile, "w") as f:
-        _ = subprocess.run(command, check=True, text=True, shell=True, cwd=workdir, stdout=f)
-    # print("workdir", workdir)
-    # input("1")
-    report_df = pd.read_csv(outfile, names=["dso", "overhead"])
-    report_df = report_df.sort_values("overhead", ascending=False)
+def get_perf_report(workdir: Path, prog: str, etiss_arch: str = "RV32IMACFD", n_slices: Optional[int] = None):
     def replace_dso_names(dso):
         temp = re.sub(r"-.*", r"", re.sub(r"\.so(\..*)?", r"", dso)).replace("[", "").replace("]", "").lower()
         if temp.startswith("librv"):
@@ -146,33 +112,93 @@ def get_perf_report(workdir: Path):
         if temp.startswith("lib"):
             return "libs"
         return temp
-    report_df["dso_new"] = report_df["dso"].apply(replace_dso_names)
+
+    run_perf_record(workdir, prog, etiss_arch=etiss_arch)
+    if n_slices is not None and n_slices > 1:
+        slice_per = 100 / n_slices
+        dfs = []
+        for i in range(n_slices):
+            command = f"perf report -F dso,overhead --stdio --time {slice_per}%/{i+1} | grep -v 'Samples' | grep '%' | tr -s ' ' | sed -e \"s/tid\\s[0-9]*//g\" |" + " awk '{print $1 \",\" $2/100}'"
+            outfile = workdir / "out.csv"
+            with open(outfile, "w") as f:
+                _ = subprocess.run(command, check=True, text=True, shell=True, cwd=workdir, stdout=f)
+            # print("workdir", workdir)
+            # input("1")
+            report_df = pd.read_csv(outfile, names=["dso", "overhead"])
+            report_df = report_df.sort_values("overhead", ascending=False)
+            report_df["dso_new"] = report_df["dso"].apply(replace_dso_names)
+            report_df["slice"] = i
+            dfs.append(report_df)
+        df = pd.concat(dfs)
+    else:
+        command = "perf report -F dso,overhead --stdio | grep '%' | tr -s ' ' | sed -e \"s/tid\\s[0-9]*//g\" | awk '{print $1 \",\" $2/100}'"
+        # print("command", command)
+
+        outfile = workdir / "out.csv"
+        with open(outfile, "w") as f:
+            _ = subprocess.run(command, check=True, text=True, shell=True, cwd=workdir, stdout=f)
+        # print("workdir", workdir)
+        # input("1")
+        report_df = pd.read_csv(outfile, names=["dso", "overhead"])
+        report_df = report_df.sort_values("overhead", ascending=False)
+        report_df["dso_new"] = report_df["dso"].apply(replace_dso_names)
+        df = report_df
     # print("report_df")
-    return report_df
+    return df
+
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--prog", default="dhry")
+    parser.add_argument("--toolchain", default="gcc")
+    parser.add_argument("--etiss-arch", default="RV32IMACFD")
+    parser.add_argument("--arch", default="rv32gc")
+    parser.add_argument("--abi", default="ilp32d")
+    parser.add_argument("--build-type", default="Release")
+    parser.add_argument("--repeat", type=int, default=2)
+    parser.add_argument("--jits", nargs="+", default=["GCC"], choices=["GCC", "TCC", "LLVM"])
+    parser.add_argument("--block-sizes", type=int, nargs="+", default=[100])
+    parser.add_argument("--num-iters", type=int, nargs="+", default=[1, 2, 5, 10, 20, 40, 80])
+    parser.add_argument("--num-slices", type=int, default=None)
+    parser.add_argument("--output", default=None)
+    args = parser.parse_args()
+    prog = args.prog
+    toolchain = args.toolchain
+    arch = args.arch
+    abi = args.abi
+    build_type = args.build_type
+    n_slices = args.num_slices
+    n_iters = args.num_iters
+    block_sizes = args.block_sizes
+    jits = args.jits
+    repeat = args.repeat
+    etiss_arch = args.etiss_arch
+
+    if n_slices is not None and n_slices > 1:
+        assert len(n_iters) == 1
+
     reports = []
     with tempfile.TemporaryDirectory() as tmpdir:
         workdir = Path(tmpdir)
         extra_ini = workdir / "extra.ini"
-        etiss_cmd = get_etiss_cmd(extra_ini)
+        # etiss_cmd = get_etiss_cmd(extra_ini, prog)
         dfs = []
-        for n_iter in ITERS:
+        for n_iter in n_iters:
             assert n_iter != 0
-            compile_prog(workdir, n_iter)
-            for block_size in BLOCK_SIZES:
+            compile_prog(workdir, prog, toolchain=toolchain, arch=arch, abi=abi, build_type=build_type, n_iter=n_iter)
+            for block_size in block_sizes:
                 assert block_size > 0
-                for jit in JITS:
+                for jit in jits:
                     populate_extra_ini(extra_ini, jit, block_size=block_size)
-                    sim_mips, sim_time, sim_instrs = get_mips(workdir, repeat=REPEAT)
-                    report_df = get_perf_report(workdir)
+                    sim_mips, sim_time, sim_instrs = get_mips(workdir, prog, etiss_arch=etiss_arch, repeat=repeat)
+                    report_df = get_perf_report(workdir, prog, etiss_arch=etiss_arch, n_slices=n_slices)
                     report_df["n_iter"] = n_iter
                     report_df["mips"] = sim_mips
                     report_df["time"] = sim_time
                     report_df["instrs"] = sim_instrs
-                    report_df["prog"] = PROG
-                    report_df["etiss_arch"] = ETISS_ARCH
+                    report_df["prog"] = prog
+                    report_df["etiss_arch"] = etiss_arch
                     report_df["block_size"] = block_size
                     report_df["jit"] = jit
                     dfs.append(report_df)
@@ -180,7 +206,7 @@ def main():
         full_df.reset_index(inplace=True)
         with pd.option_context("display.max_rows", None, "display.max_columns", None):
             print(full_df)
-        full_df.to_csv(OUTFILE, index=False)
+        full_df.to_csv(args.output, index=False)
 
         # for group, group_df in full_df.groupby(["prog", "etiss_arch", "block_size", "jit"]):
         #     group_df = group_df.groupby(["n_iter","dso_new"], as_index=False).agg({"overhead": np.sum})
