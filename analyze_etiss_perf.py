@@ -11,21 +11,26 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 
+from contextlib import nullcontext
 
 DIR = os.path.dirname(os.path.realpath(__file__))
 
 # TODO
-DIR = Path(DIR).parent
+DIR = Path(DIR)
 
-ETISS_INSTALL_DIR = Path(os.getenv("ETISS_INSTALL_DIR", "/work/git/hm/etiss_48bit/48bit-riscv-flow/install/etiss/"))
+ETISS_INSTALL_DIR = Path(os.getenv("ETISS_INSTALL_DIR", "/home/mohamed/thesis/etiss/build_dir/"))
 ETISS_EXE = ETISS_INSTALL_DIR / "bin" / "bare_etiss_processor"
-ETISS_EXAMPLES_DIR = Path(os.getenv("ETISS_EXAMPLES_DIR", "/work/git/hm/etiss_48bit/48bit-riscv-flow/etiss_riscv_examples"))
+ETISS_EXAMPLES_DIR = Path(os.getenv("ETISS_EXAMPLES_DIR", "/home/mohamed/thesis/etiss_riscv_examples"))
 
-def populate_extra_ini(ini_path: Path, jit: str, block_size: Optional[int]):
+def populate_extra_ini(ini_path: Path, jit: str, fast_jit: Optional[str], block_size: Optional[int]):
     content = f"""
 [StringConfigurations]
 jit.type={jit}JIT
+"""
+    if fast_jit:
+        content += f"jit.fast_type={fast_jit}JIT\n"
 
+    content += f"""
 [IntConfigurations]
 etiss.max_block_size={block_size}
 """
@@ -66,14 +71,18 @@ def get_mips(workdir: Path, prog: str, etiss_arch: str = "RV32IMACFD", repeat: i
 def compile_prog(workdir: Path, prog: str, toolchain: str = "gcc", arch: str = "rv32gc", abi: str = "ilp32d", build_type: str = "Release", n_iter: int = 1):
     command = f"{DIR}/scripts/compile_example.sh {prog} {toolchain} {arch} {abi} {build_type} {n_iter}"
     # _ = subprocess.run(command, check=True, text=True, shell=True, cwd=workdir, capture_output=True)
-    _ = subprocess.run(command, check=True, text=True, shell=True, capture_output=True)
+    print("Running:", command)
+    proc = subprocess.run(command, text=True, shell=True, capture_output=True)
+    print("STDOUT:\n", proc.stdout)
+    print("STDERR:\n", proc.stderr)
+    proc.check_returncode()
 
 def run_perf_record(workdir: Path, prog: str, etiss_arch: str = "RV32IMACFD"):
     extra_ini = workdir / "extra.ini"
     etiss_cmd = get_etiss_cmd(extra_ini, prog, etiss_arch=etiss_arch)
 
     command = f"perf record -o {workdir}/perf.data {etiss_cmd}"
-    # print("command", command)
+    print("Running:", command)
     # print("cwd", workdir)
     # _ = subprocess.run(command, check=True, text=True, shell=True, cwd=workdir, capture_output=True)
     proc = subprocess.run(command, check=True, shell=True, cwd=workdir, capture_output=True)
@@ -158,8 +167,10 @@ def main():
     parser.add_argument("--build-type", default="Release")
     parser.add_argument("--repeat", type=int, default=2)
     parser.add_argument("--jits", nargs="+", default=["GCC"], choices=["GCC", "TCC", "LLVM"])
+    parser.add_argument("--fast-jit", default=None, choices=[None, "TCC", "LLVM"], help="Optional fast JIT for initial compilation")
     parser.add_argument("--block-sizes", type=int, nargs="+", default=[100])
-    parser.add_argument("--num-iters", type=int, nargs="+", default=[1, 2, 5, 10, 20, 40, 80])
+    # parser.add_argument("--num-iters", type=int, nargs="+", default=[1, 2, 5, 10, 20, 40, 80])
+    parser.add_argument("--num-iters", type=int, nargs="+", default=[1])
     parser.add_argument("--num-slices", type=int, default=None)
     parser.add_argument("--output", default=None)
     args = parser.parse_args()
@@ -174,12 +185,16 @@ def main():
     jits = args.jits
     repeat = args.repeat
     etiss_arch = args.etiss_arch
+    fast_jit = args.fast_jit
+
+    TMP_PATH = Path("/home/mohamed/thesis/etiss-profiling-scripts/tmp")
 
     if n_slices is not None and n_slices > 1:
         assert len(n_iters) == 1
 
     reports = []
-    with tempfile.TemporaryDirectory() as tmpdir:
+    # with tempfile.TemporaryDirectory(dir=str(TMP_PATH)) as tmpdir:
+    with nullcontext(str(TMP_PATH)) as tmpdir:
         workdir = Path(tmpdir)
         extra_ini = workdir / "extra.ini"
         # etiss_cmd = get_etiss_cmd(extra_ini, prog)
@@ -190,7 +205,7 @@ def main():
             for block_size in block_sizes:
                 assert block_size > 0
                 for jit in jits:
-                    populate_extra_ini(extra_ini, jit, block_size=block_size)
+                    populate_extra_ini(extra_ini, jit, fast_jit, block_size=block_size)
                     sim_mips, sim_time, sim_instrs = get_mips(workdir, prog, etiss_arch=etiss_arch, repeat=repeat)
                     report_df = get_perf_report(workdir, prog, etiss_arch=etiss_arch, n_slices=n_slices)
                     report_df["n_iter"] = n_iter
@@ -208,21 +223,7 @@ def main():
             print(full_df)
         full_df.to_csv(args.output, index=False)
 
-        # for group, group_df in full_df.groupby(["prog", "etiss_arch", "block_size", "jit"]):
-        #     group_df = group_df.groupby(["n_iter","dso_new"], as_index=False).agg({"overhead": np.sum})
-        #     group_df = group_df.sort_values("overhead", ascending=False)
-        #     print("group", group)
-        #     title = " - ".join(map(str, group))
-        #     print(group_df)
-        #     group_df_ = group_df.copy()
-        #     for dso in group_df_["dso_new"].unique():
-        #         new = pd.DataFrame([{"dso_new": dso, "n_iter": 0, "overhead": 0}])
-        #         group_df_ = pd.concat([group_df_, new])
-        #     # TODO: add mips on other axis?
-        #     # fig = px.area(group_df, x="n_iter", y="overhead", color="dso_new", line_group="country")
-        #     fig = px.area(group_df_, x="n_iter", y="overhead", color="dso_new", title=title)
-        #     fig.write_html("plot.html")
-        #     input("CHECK HTML")
+
 
 
 if __name__ == "__main__":
