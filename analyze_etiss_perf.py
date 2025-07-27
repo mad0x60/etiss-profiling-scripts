@@ -21,6 +21,8 @@ DIR = Path(DIR)
 ETISS_INSTALL_DIR = Path(os.getenv("ETISS_INSTALL_DIR", "/home/mohamed/thesis/etiss/build_dir/"))
 ETISS_EXE = ETISS_INSTALL_DIR / "bin" / "bare_etiss_processor"
 ETISS_EXAMPLES_DIR = Path(os.getenv("ETISS_EXAMPLES_DIR", "/home/mohamed/thesis/etiss_riscv_examples"))
+TMP_PATH = Path("/home/mohamed/thesis/etiss-profiling-scripts/tmp")
+
 
 def populate_extra_ini(ini_path: Path, jit: str, fast_jit: Optional[str], block_size: Optional[int]):
     content = f"""
@@ -33,17 +35,25 @@ jit.type={jit}JIT
     content += f"""
 [IntConfigurations]
 etiss.max_block_size={block_size}
+etiss.loglevel=1
 """
     with open(ini_path, "w") as f:
         f.write(content)
 
-def get_etiss_cmd(extra_ini: Path, prog: str, etiss_arch: str = "RV32IMACFD"):
+def get_etiss_cmd(extra_ini: Path, prog: str, etiss_arch: str = "RV32IMACFD", block_size: int = 100, jit: str = "GCC", fast_jit: Optional[str] = None, n_iter: int = 1):
     etiss_cmd = f"{ETISS_EXE} -i{ETISS_EXAMPLES_DIR}/build/install/ini/{prog}.ini -i{extra_ini} --arch.cpu={etiss_arch}"
+    # Create output directory structure
+    out_dir = TMP_PATH / prog
+    out_dir.mkdir(exist_ok=True)
+    fast_jit_str = fast_jit if fast_jit else "None"
+    out_file = out_dir / f"{block_size}_{jit}_{fast_jit_str}_{n_iter}_time_tracker.log"
+    etiss_cmd += f" --time_tracker.enable=true --time_tracker.out_path={out_file}"
+    print("$ etiss_cmd:", etiss_cmd)
     return etiss_cmd
 
-def get_mips(workdir: Path, prog: str, etiss_arch: str = "RV32IMACFD", repeat: int = 1):
+def get_mips(workdir: Path, prog: str, etiss_arch: str = "RV32IMACFD", repeat: int = 1, block_size: int = 100, jit: str = "GCC", fast_jit: Optional[str] = None, n_iter: int = 1):
     extra_ini = workdir / "extra.ini"
-    etiss_cmd = get_etiss_cmd(extra_ini, prog, etiss_arch=etiss_arch)
+    etiss_cmd = get_etiss_cmd(extra_ini, prog, etiss_arch=etiss_arch, block_size=block_size, jit=jit, fast_jit=fast_jit, n_iter=n_iter)
     # TODO: run multiple times for avg?
     all_mips = []
     all_times = []
@@ -52,17 +62,17 @@ def get_mips(workdir: Path, prog: str, etiss_arch: str = "RV32IMACFD", repeat: i
         proc = subprocess.run(etiss_cmd, check=True, text=True, shell=True, cwd=workdir, capture_output=True)
         out = proc.stdout
         print("out", out)
-        mips_match = re.search(r"MIPS \(estimated\): (.*)", out)
+        mips_match = re.search(r"MIPS \(estimated\): ([\d.]+)", out)
         assert mips_match is not None
         mips_str = mips_match.group(1)
         mips = float(mips_str)
         all_mips.append(mips)
-        time_match = re.search(r"Simulation Time: (.*)s", out)
+        time_match = re.search(r"Simulation Time: ([\d.]+)s", out)
         assert time_match is not None
         time_str = time_match.group(1)
         time = float(time_str)
         all_times.append(time)
-    sim_insns = re.search(r"CPU Cycles \(estimated\): (.*)", out)
+    sim_insns = re.search(r"CPU Cycles \(estimated\): ([\d.]+)", out)
     sim_insns = int(float(sim_insns.group(1)))
     avg_mips = sum(all_mips) / repeat
     avg_time = sum(all_times) / repeat
@@ -71,25 +81,19 @@ def get_mips(workdir: Path, prog: str, etiss_arch: str = "RV32IMACFD", repeat: i
 def compile_prog(workdir: Path, prog: str, toolchain: str = "gcc", arch: str = "rv32gc", abi: str = "ilp32d", build_type: str = "Release", n_iter: int = 1):
     command = f"{DIR}/scripts/compile_example.sh {prog} {toolchain} {arch} {abi} {build_type} {n_iter}"
     # _ = subprocess.run(command, check=True, text=True, shell=True, cwd=workdir, capture_output=True)
-    print("Running:", command)
+    # print("Running:", command)
     proc = subprocess.run(command, text=True, shell=True, capture_output=True)
-    print("STDOUT:\n", proc.stdout)
-    print("STDERR:\n", proc.stderr)
+    # print("STDOUT:\n", proc.stdout)
+    # print("STDERR:\n", proc.stderr)
     proc.check_returncode()
 
-def run_perf_record(workdir: Path, prog: str, etiss_arch: str = "RV32IMACFD"):
+def run_perf_record(workdir: Path, prog: str, etiss_arch: str = "RV32IMACFD", block_size: int = 100, jit: str = "GCC", fast_jit: Optional[str] = None, n_iter: int = 1):
     extra_ini = workdir / "extra.ini"
-    etiss_cmd = get_etiss_cmd(extra_ini, prog, etiss_arch=etiss_arch)
+    etiss_cmd = get_etiss_cmd(extra_ini, prog, etiss_arch=etiss_arch, block_size=block_size, jit=jit, fast_jit=fast_jit, n_iter=n_iter)
 
     command = f"perf record -o {workdir}/perf.data {etiss_cmd}"
     print("Running:", command)
-    # print("cwd", workdir)
-    # _ = subprocess.run(command, check=True, text=True, shell=True, cwd=workdir, capture_output=True)
     proc = subprocess.run(command, check=True, shell=True, cwd=workdir, capture_output=True)
-    # out = proc.stdout.decode()
-    # print("out", out)
-    # input("???")
-
 
 def get_perf_report(workdir: Path, prog: str, etiss_arch: str = "RV32IMACFD", n_slices: Optional[int] = None):
     def replace_dso_names(dso):
@@ -167,7 +171,7 @@ def main():
     parser.add_argument("--build-type", default="Release")
     parser.add_argument("--repeat", type=int, default=2)
     parser.add_argument("--jits", nargs="+", default=["GCC"], choices=["GCC", "TCC", "LLVM"])
-    parser.add_argument("--fast-jit", default=None, choices=[None, "TCC", "LLVM"], help="Optional fast JIT for initial compilation")
+    parser.add_argument("--fast-jit", nargs="+", default=[None], choices=["None", "TCC", "LLVM"], help="Optional fast JIT for initial compilation")
     parser.add_argument("--block-sizes", type=int, nargs="+", default=[100])
     # parser.add_argument("--num-iters", type=int, nargs="+", default=[1, 2, 5, 10, 20, 40, 80])
     parser.add_argument("--num-iters", type=int, nargs="+", default=[1])
@@ -185,9 +189,8 @@ def main():
     jits = args.jits
     repeat = args.repeat
     etiss_arch = args.etiss_arch
-    fast_jit = args.fast_jit
-
-    TMP_PATH = Path("/home/mohamed/thesis/etiss-profiling-scripts/tmp")
+    # fast_jit = args.fast_jit
+    fast_jit = [None if x == "None" else x for x in args.fast_jit]
 
     if n_slices is not None and n_slices > 1:
         assert len(n_iters) == 1
@@ -205,23 +208,28 @@ def main():
             for block_size in block_sizes:
                 assert block_size > 0
                 for jit in jits:
-                    populate_extra_ini(extra_ini, jit, fast_jit, block_size=block_size)
-                    sim_mips, sim_time, sim_instrs = get_mips(workdir, prog, etiss_arch=etiss_arch, repeat=repeat)
-                    report_df = get_perf_report(workdir, prog, etiss_arch=etiss_arch, n_slices=n_slices)
-                    report_df["n_iter"] = n_iter
-                    report_df["mips"] = sim_mips
-                    report_df["time"] = sim_time
-                    report_df["instrs"] = sim_instrs
-                    report_df["prog"] = prog
-                    report_df["etiss_arch"] = etiss_arch
-                    report_df["block_size"] = block_size
-                    report_df["jit"] = jit
-                    dfs.append(report_df)
-        full_df = pd.concat(dfs)
-        full_df.reset_index(inplace=True)
-        with pd.option_context("display.max_rows", None, "display.max_columns", None):
-            print(full_df)
-        full_df.to_csv(args.output, index=False)
+                    for fj in fast_jit:
+                        print("====================================================")
+                        print("n_iter", n_iter, "block_size", block_size, "jit", jit, "fast jit", fj)
+                        populate_extra_ini(extra_ini, jit, fj, block_size=block_size)
+                        sim_mips, sim_time, sim_instrs = get_mips(workdir, prog, etiss_arch=etiss_arch, repeat=repeat, 
+                                                                block_size=block_size, jit=jit, fast_jit=fj, n_iter=n_iter)
+                    # report_df = get_perf_report(workdir, prog, etiss_arch=etiss_arch, n_slices=n_slices)
+        #             report_df["n_iter"] = n_iter
+        #             report_df["mips"] = sim_mips
+        #             report_df["time"] = sim_time
+        #             report_df["instrs"] = sim_instrs
+        #             report_df["prog"] = prog
+        #             report_df["etiss_arch"] = etiss_arch
+        #             report_df["block_size"] = block_size
+        #             report_df["jit"] = jit
+        #             dfs.append(report_df)
+        # full_df = pd.concat(dfs)
+        # full_df.reset_index(inplace=True)
+        # disable printing full df
+        # with pd.option_context("display.max_rows", None, "display.max_columns", None):
+        #     print(full_df)
+        # full_df.to_csv(args.output, index=False)
 
 
 

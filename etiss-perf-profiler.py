@@ -35,21 +35,18 @@ def compile_prog(prog: str, toolchain: str = "gcc", arch: str = "rv32gc", abi: s
     proc = subprocess.run(command, text=True, shell=True, capture_output=True)
     proc.check_returncode()
 
-def get_etiss_cmd(extra_ini: Path, prog: str, etiss_arch: str = "RV32IMACFD", block_size: int = 100, jit: str = "GCC", fast_jit: str = None, n_iter: int = 1):
-    """Construct full ETISS command with all parameters."""
+def get_etiss_cmd(extra_ini: Path, prog: str, etiss_arch: str = "RV32IMACFD"):
+    """Construct ETISS command."""
     etiss_cmd = f"{ETISS_EXE} -i{ETISS_EXAMPLES_DIR}/build/install/ini/{prog}.ini -i{extra_ini} --arch.cpu={etiss_arch}"
-    
-    # Create output directory structure for time tracker
-    out_dir = OUTPUT_DIR / prog
-    out_dir.mkdir(exist_ok=True)
-    fast_jit_str = fast_jit if fast_jit else "None"
-    out_file = out_dir / f"{block_size}_{jit}_{fast_jit_str}_{n_iter}_time_tracker.log"
-    etiss_cmd += f" --time_tracker.enable=true --time_tracker.out_path={out_file}"
-    
-    print("$ etiss_cmd:", etiss_cmd)
     return etiss_cmd
 
-def run_perf_profile(prog: str, jit: str = "GCC", fast_jit: str = None, block_size: int = 100, n_iter: int = 1, etiss_arch: str = "RV32IMACFD"):
+def add_time_track_settings(etiss_cmd, output_dir, base_name):
+    """Adds time tracker settings to the ETISS command and returns the log file path."""
+    time_tracker_log_file = output_dir / f"{base_name}_time_tracker.log"
+    etiss_cmd += f" --time_tracker.enable=true --time_tracker.out_path={time_tracker_log_file}"
+    return etiss_cmd, time_tracker_log_file
+
+def run_perf_profile(prog: str, jit: str = "GCC", fast_jit: str = None, block_size: int = 100, n_iter: int = 1, etiss_arch: str = "RV32IMACFD", time_track: bool = False):
     """Run ETISS with perf profiling."""
     # Create output directory
     output_dir = OUTPUT_DIR / prog
@@ -59,12 +56,19 @@ def run_perf_profile(prog: str, jit: str = "GCC", fast_jit: str = None, block_si
     extra_ini = output_dir / "extra.ini"
     setup_ini(extra_ini, jit, fast_jit, block_size)
 
-    # Get full ETISS command with all parameters
-    etiss_cmd = get_etiss_cmd(extra_ini, prog, etiss_arch=etiss_arch, block_size=block_size, jit=jit, fast_jit=fast_jit, n_iter=n_iter)
+    # Get base ETISS command
+    etiss_cmd = get_etiss_cmd(extra_ini, prog, etiss_arch=etiss_arch)
 
-    # Create output directory structure
+    # Create output directory structure and base name for files
     fast_jit_str = fast_jit if fast_jit else "None"
     base_name = f"{block_size}_{jit}_{fast_jit_str}_{n_iter}"
+
+    # Add time tracker settings if requested
+    time_tracker_log_file = None
+    if time_track:
+        etiss_cmd, time_tracker_log_file = add_time_track_settings(etiss_cmd, output_dir, base_name)
+    
+    print("$ etiss_cmd:", etiss_cmd)
     
     # Setup perf output files
     perf_data = output_dir / f"{base_name}_perf.data"
@@ -86,12 +90,19 @@ def run_perf_profile(prog: str, jit: str = "GCC", fast_jit: str = None, block_si
     perf_report_cmd = f"perf report -i {perf_data} --stdio > {perf_report}"
     subprocess.run(perf_report_cmd, shell=True, check=True)
 
+    # Analyze time tracker log if it was created
+    if time_tracker_log_file:
+        print(f"Analyzing time tracker log: {time_tracker_log_file}")
+        analysis_cmd = f"python3 ./analyze_time_tracker_log.py {time_tracker_log_file}"
+        subprocess.run(analysis_cmd, shell=True, check=True)
+
     print(f"\nProfiling completed!")
     print(f"Results saved to:")
     print(f"  Perf data: {perf_data}")
     print(f"  Firefox profiler data: {firefox_prof_data}")
     print(f"  Perf report: {perf_report}")
-    print(f"  Time tracker log: {output_dir / f'{base_name}_time_tracker.log'}")
+    if time_tracker_log_file:
+        print(f"  Time tracker log: {time_tracker_log_file}")
 
 def main():
     parser = argparse.ArgumentParser(description="Profile ETISS execution using perf")
@@ -109,6 +120,7 @@ def main():
     parser.add_argument("--num-slices", type=int, default=None)
     parser.add_argument("--output", default=None)
     parser.add_argument("--perf-only", action="store_true", help="Only run perf profiling without MIPS measurements")
+    parser.add_argument("--time-track", action="store_true", help="Run with time tracker and analyze results")
     args = parser.parse_args()
 
     # Process arguments
@@ -140,7 +152,8 @@ def main():
                         fast_jit=fj,
                         block_size=block_size,
                         n_iter=n_iter,
-                        etiss_arch=etiss_arch
+                        etiss_arch=etiss_arch,
+                        time_track=args.time_track
                     )
 
 if __name__ == "__main__":
