@@ -35,9 +35,10 @@ def compile_prog(prog: str, toolchain: str = "gcc", arch: str = "rv32gc", abi: s
     proc = subprocess.run(command, text=True, shell=True, capture_output=True)
     proc.check_returncode()
 
-def get_etiss_cmd(extra_ini: Path, prog: str, etiss_arch: str = "RV32IMACFD"):
+def get_etiss_cmd(extra_ini: Path, prog: str, etiss_arch: str = "RV32IMACFD", build_dir: str = "build"):
     """Construct ETISS command."""
-    etiss_cmd = f"{ETISS_EXE} -i{ETISS_EXAMPLES_DIR}/build/install/ini/{prog}.ini -i{extra_ini} --arch.cpu={etiss_arch}"
+    ini_path = ETISS_EXAMPLES_DIR / build_dir / "install" / "ini" / f"{prog}.ini"
+    etiss_cmd = f"{ETISS_EXE} -i{ini_path} -i{extra_ini} --arch.cpu={etiss_arch}"
     return etiss_cmd
 
 def add_time_track_settings(etiss_cmd, output_dir, base_name):
@@ -46,7 +47,7 @@ def add_time_track_settings(etiss_cmd, output_dir, base_name):
     etiss_cmd += f" --time_tracker.enable=true --time_tracker.out_path={time_tracker_log_file}"
     return etiss_cmd, time_tracker_log_file
 
-def run_perf_profile(prog: str, jit: str = "GCC", fast_jit: str = None, block_size: int = 100, n_iter: int = 1, etiss_arch: str = "RV32IMACFD", time_track: bool = False):
+def run_perf_profile(prog: str, jit: str = "GCC", fast_jit: str = None, block_size: int = 100, n_iter: int = 1, etiss_arch: str = "RV32IMACFD", time_track: bool = False, build_dir: str = "build"):
     """Run ETISS with perf profiling."""
     # Create output directory
     output_dir = OUTPUT_DIR / prog
@@ -57,7 +58,7 @@ def run_perf_profile(prog: str, jit: str = "GCC", fast_jit: str = None, block_si
     setup_ini(extra_ini, jit, fast_jit, block_size)
 
     # Get base ETISS command
-    etiss_cmd = get_etiss_cmd(extra_ini, prog, etiss_arch=etiss_arch)
+    etiss_cmd = get_etiss_cmd(extra_ini, prog, etiss_arch=etiss_arch, build_dir=build_dir)
 
     # Create output directory structure and base name for files
     fast_jit_str = fast_jit if fast_jit else "None"
@@ -77,13 +78,13 @@ def run_perf_profile(prog: str, jit: str = "GCC", fast_jit: str = None, block_si
     
     # Run perf record
     print(f"Running perf record for {prog}...")
-    perf_record_cmd = f"perf record -F 999 -g --call-graph dwarf -o {perf_data} {etiss_cmd}"
+    perf_record_cmd = f"perf record -F 9999 -g --call-graph dwarf -o {perf_data} {etiss_cmd}"
     subprocess.run(perf_record_cmd, shell=True, check=True)
 
     # Generate Firefox profiler data
-    print(f"Generating Firefox profiler data...")
-    perf_script_cmd = f"perf script -i {perf_data} > {firefox_prof_data}"
-    subprocess.run(perf_script_cmd, shell=True, check=True)
+    # print(f"Generating Firefox profiler data...")
+    # perf_script_cmd = f"perf script -i {perf_data} > {firefox_prof_data}"
+    # subprocess.run(perf_script_cmd, shell=True, check=True)
 
     # Generate perf report
     print(f"Generating perf report...")
@@ -108,7 +109,7 @@ def main():
     parser = argparse.ArgumentParser(description="Profile ETISS execution using perf")
     parser.add_argument("--prog", default="dhry")
     parser.add_argument("--toolchain", default="gcc")
-    parser.add_argument("--etiss-arch", default="RV32IMACFD")
+    parser.add_argument("--etiss-arch", default="RV32IMACFDV")
     parser.add_argument("--arch", default="rv32gc")
     parser.add_argument("--abi", default="ilp32d")
     parser.add_argument("--build-type", default="Release")
@@ -121,6 +122,8 @@ def main():
     parser.add_argument("--output", default=None)
     parser.add_argument("--perf-only", action="store_true", help="Only run perf profiling without MIPS measurements")
     parser.add_argument("--time-track", action="store_true", help="Run with time tracker and analyze results")
+    parser.add_argument("--build-dir", default="build", help="Name of the build directory in etiss_riscv_examples.")
+    parser.add_argument("--no-compile", action="store_true", help="Skip compilation step.")
     args = parser.parse_args()
 
     # Process arguments
@@ -135,9 +138,11 @@ def main():
     jits = args.jits
     etiss_arch = args.etiss_arch
     fast_jit = [None if x == "None" else x for x in args.fast_jit]
+    build_dir = args.build_dir
 
     # Compile program once
-    compile_prog(prog, toolchain=toolchain, arch=arch, abi=abi, build_type=build_type)
+    if not args.no_compile:
+        compile_prog(prog, toolchain=toolchain, arch=arch, abi=abi, build_type=build_type)
 
     # Run profiling for each combination
     for n_iter in n_iters:
@@ -153,7 +158,8 @@ def main():
                         block_size=block_size,
                         n_iter=n_iter,
                         etiss_arch=etiss_arch,
-                        time_track=args.time_track
+                        time_track=args.time_track,
+                        build_dir=build_dir
                     )
 
 if __name__ == "__main__":
