@@ -62,7 +62,7 @@ def run_perf_profile(prog: str, jit: str = "GCC", fast_jit: str = None, block_si
 
     # Create output directory structure and base name for files
     fast_jit_str = fast_jit if fast_jit else "None"
-    base_name = f"{block_size}_{jit}_{fast_jit_str}_{n_iter}"
+    base_name = f"{build_dir}_{block_size}_{jit}_{fast_jit_str}_{n_iter}"
 
     # Add time tracker settings if requested
     time_tracker_log_file = None
